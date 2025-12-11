@@ -2,9 +2,9 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Type, Image, Minus, Move, Pencil, Trash2, Eraser, Maximize2, LogOut } from 'lucide-react';
 
 export default function ProjectPlanningBoard() {
-  // Supabase configuration - REPLACE WITH YOUR KEYS
-  const SUPABASE_URL = 'YOUR_PROJECT_URL'; // e.g., https://xxxxx.supabase.co
-  const SUPABASE_ANON_KEY = 'YOUR_ANON_KEY';
+  // Supabase configuration
+  const SUPABASE_URL = 'https://wdxeucdxzwerqkdicwgq.supabase.co';
+  const SUPABASE_ANON_KEY = 'sb_publishable_FK3P8dHVNIQLNQrbFJ6rCw_u-Jtpa_K';
   
   // Auth state
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -914,11 +914,35 @@ export default function ProjectPlanningBoard() {
     return () => clearTimeout(saveTimeout);
   }, [elements, groups, collaborationMode]);
 
-  // Auto-save to cloud storage (persistent memory)
+  // Initialize Supabase client
+  const getSupabase = () => {
+    if (typeof window === 'undefined') return null;
+    if (!window.supabaseClient) {
+      // Dynamic import of Supabase
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
+      document.head.appendChild(script);
+    }
+    if (window.supabase) {
+      if (!window.supabaseClient) {
+        window.supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      }
+      return window.supabaseClient;
+    }
+    return null;
+  };
+
+  // Auto-save to Supabase
   const saveToCloud = async () => {
-    if (!window.storage) return; // Check if storage API is available
+    if (!currentUser) return;
     
     try {
+      const supabase = getSupabase();
+      if (!supabase) {
+        console.log('Supabase not loaded yet');
+        return;
+      }
+      
       const boardData = {
         name: currentBoardName,
         elements,
@@ -927,51 +951,86 @@ export default function ProjectPlanningBoard() {
         savedAt: new Date().toISOString()
       };
       
-      // Save to cloud with board name as key
-      await window.storage.set(`board:${currentBoardName}`, JSON.stringify(boardData), false); // false = personal data
+      const boardId = `${currentUser.username}-${currentBoardName}`;
+      
+      const { error } = await supabase
+        .from('boards')
+        .upsert({
+          id: boardId,
+          user_id: currentUser.username,
+          data: boardData,
+          updated_at: new Date().toISOString()
+        });
+      
+      if (error) throw error;
       setLastSaved(new Date());
     } catch (err) {
-      console.error('Error saving to cloud:', err);
+      console.error('Error saving to Supabase:', err);
     }
   };
 
-  // Load from cloud storage
+  // Load from Supabase
   const loadFromCloud = async (boardName) => {
-    if (!window.storage) return;
+    if (!currentUser) return;
     
     try {
-      const result = await window.storage.get(`board:${boardName}`, false);
-      if (result && result.value) {
-        const boardData = JSON.parse(result.value);
+      const supabase = getSupabase();
+      if (!supabase) {
+        alert('Database not connected yet. Please wait a moment.');
+        return;
+      }
+      
+      const boardId = `${currentUser.username}-${boardName}`;
+      
+      const { data, error } = await supabase
+        .from('boards')
+        .select('data')
+        .eq('id', boardId)
+        .single();
+      
+      if (error) throw error;
+      
+      if (data && data.data) {
+        const boardData = data.data;
         setElements(boardData.elements || []);
         setGroups(boardData.groups || []);
         setZoom(boardData.zoom || 1);
         setCurrentBoardName(boardName);
         setLastSaved(new Date(boardData.savedAt));
-        alert(`Loaded: ${boardName} from cloud`);
+        alert(`Loaded: ${boardName}`);
       }
     } catch (err) {
-      console.error('Error loading from cloud:', err);
-      alert('Board not found in cloud storage');
+      console.error('Error loading from Supabase:', err);
+      alert('Board not found');
     }
   };
 
-  // List all boards in cloud
+  // List all boards for current user
   const listCloudBoards = async () => {
-    if (!window.storage) return;
+    if (!currentUser) return;
     
     try {
-      const result = await window.storage.list('board:', false);
-      if (result && result.keys) {
-        const boardNames = result.keys.map(key => key.replace('board:', ''));
-        if (boardNames.length === 0) {
-          alert('No boards found in cloud storage.');
-          return;
-        }
-        alert(`Cloud boards:\n\n${boardNames.join('\n')}`);
+      const supabase = getSupabase();
+      if (!supabase) {
+        alert('Database not connected yet. Please wait a moment.');
+        return;
+      }
+      
+      const { data, error } = await supabase
+        .from('boards')
+        .select('id, data')
+        .eq('user_id', currentUser.username);
+      
+      if (error) throw error;
+      
+      if (data && data.length > 0) {
+        const boardNames = data.map(b => b.data.name || b.id);
+        alert(`Your boards:\n\n${boardNames.join('\n')}`);
+      } else {
+        alert('No boards found.');
       }
     } catch (err) {
-      console.error('Error listing cloud boards:', err);
+      console.error('Error listing boards:', err);
     }
   };
 
@@ -999,76 +1058,83 @@ export default function ProjectPlanningBoard() {
   // Auto-save effect
   useEffect(() => {
     const autoSave = setTimeout(() => {
-      if (elements.length > 0 || groups.length > 0) {
-        if (window.storage) {
-          // Prefer cloud storage (syncs across sessions)
-          saveToCloud();
-        } else if (directoryHandle) {
-          // Fall back to file system
-          saveToFileSystem();
-        } else {
-          // Final fallback to IndexedDB
-          saveToIndexedDB();
-        }
+      if ((elements.length > 0 || groups.length > 0) && currentUser) {
+        // Save to Supabase
+        saveToCloud();
+        // Also save to IndexedDB as backup
+        saveToIndexedDB();
       }
     }, 3000);
 
     return () => clearTimeout(autoSave);
-  }, [elements, groups, directoryHandle]);
+  }, [elements, groups, currentUser]);
 
-  // Load from cloud or IndexedDB on mount
+  // Load from Supabase on login
   useEffect(() => {
+    if (!currentUser) return;
+    
     const loadData = async () => {
-      // Check if user wants to start fresh (add ?fresh to URL or localStorage flag)
+      // Wait for Supabase to load
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      // Check if user wants to start fresh
       const urlParams = new URLSearchParams(window.location.search);
-      const startFresh = urlParams.get('fresh') === 'true' || localStorage.getItem('startFresh') === 'true';
+      const startFresh = urlParams.get('fresh') === 'true';
       
       if (startFresh) {
-        localStorage.removeItem('startFresh');
         console.log('Starting with fresh board');
         return;
       }
       
-      // Try cloud first
-      if (window.storage) {
-        try {
-          const result = await window.storage.get(`board:${currentBoardName}`, false);
-          if (result && result.value) {
-            const boardData = JSON.parse(result.value);
+      // Try Supabase first
+      try {
+        const supabase = getSupabase();
+        if (supabase) {
+          const boardId = `${currentUser.username}-${currentBoardName}`;
+          const { data, error } = await supabase
+            .from('boards')
+            .select('data')
+            .eq('id', boardId)
+            .single();
+          
+          if (data && data.data) {
+            const boardData = data.data;
             setElements(boardData.elements || []);
             setGroups(boardData.groups || []);
             setZoom(boardData.zoom || 1);
             setLastSaved(new Date(boardData.savedAt));
-            console.log('Loaded from cloud storage');
+            console.log('Loaded from Supabase');
             return;
           }
-        } catch (err) {
-          console.log('No cloud data found, trying IndexedDB...');
         }
+      } catch (err) {
+        console.log('No Supabase data found, trying IndexedDB...');
       }
       
       // Fallback to IndexedDB
-      if (!directoryHandle) {
-        try {
-          const db = await openDB();
-          const tx = db.transaction('boards', 'readonly');
-          const boardData = await tx.objectStore('boards').get(currentBoardName);
-          
-          if (boardData) {
-            setElements(boardData.elements || []);
-            setGroups(boardData.groups || []);
-            setZoom(boardData.zoom || 1);
-            setLastSaved(new Date(boardData.savedAt));
-            console.log('Loaded from IndexedDB');
-          }
-        } catch (err) {
-          console.log('No saved data in IndexedDB');
+      try {
+        const db = await openDB();
+        const tx = db.transaction('boards', 'readonly');
+        const boardData = await tx.objectStore('boards').get(currentBoardName);
+        
+        if (boardData) {
+          setElements(boardData.elements || []);
+          setGroups(boardData.groups || []);
+          setZoom(boardData.zoom || 1);
+          setLastSaved(new Date(boardData.savedAt));
+          console.log('Loaded from IndexedDB');
         }
+      } catch (err) {
+        console.log('No saved data in IndexedDB');
       }
     };
     
-    loadData();
-  }, []);
+    // Load Supabase script first
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
+    script.onload = () => loadData();
+    document.head.appendChild(script);
+  }, [currentUser]);
 
   // Track changes for history
   useEffect(() => {

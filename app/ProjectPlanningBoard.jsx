@@ -1074,8 +1074,17 @@ export default function ProjectPlanningBoard() {
     if (!currentUser) return;
     
     const loadData = async () => {
-      // Wait for Supabase to load
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Wait for Supabase to be ready
+      let attempts = 0;
+      while (!window.supabase && attempts < 20) {
+        await new Promise(resolve => setTimeout(resolve, 250));
+        attempts++;
+      }
+      
+      if (!window.supabase) {
+        console.log('Supabase failed to load');
+        return;
+      }
       
       // Check if user wants to start fresh
       const urlParams = new URLSearchParams(window.location.search);
@@ -1086,29 +1095,33 @@ export default function ProjectPlanningBoard() {
         return;
       }
       
-      // Try Supabase first
+      // Try Supabase
       try {
-        const supabase = getSupabase();
-        if (supabase) {
-          const boardId = `${currentUser.username}-${currentBoardName}`;
-          const { data, error } = await supabase
-            .from('boards')
-            .select('data')
-            .eq('id', boardId)
-            .single();
-          
-          if (data && data.data) {
-            const boardData = data.data;
-            setElements(boardData.elements || []);
-            setGroups(boardData.groups || []);
-            setZoom(boardData.zoom || 1);
-            setLastSaved(new Date(boardData.savedAt));
-            console.log('Loaded from Supabase');
-            return;
-          }
+        const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        const boardId = `${currentUser.username}-${currentBoardName}`;
+        console.log('Loading board:', boardId);
+        
+        const { data, error } = await supabase
+          .from('boards')
+          .select('data')
+          .eq('id', boardId)
+          .single();
+        
+        if (error) {
+          console.log('Supabase error:', error);
+        }
+        
+        if (data && data.data) {
+          const boardData = data.data;
+          setElements(boardData.elements || []);
+          setGroups(boardData.groups || []);
+          setZoom(boardData.zoom || 1);
+          setLastSaved(new Date(boardData.savedAt));
+          console.log('Loaded from Supabase:', boardData.elements?.length, 'elements');
+          return;
         }
       } catch (err) {
-        console.log('No Supabase data found, trying IndexedDB...');
+        console.log('Error loading from Supabase:', err);
       }
       
       // Fallback to IndexedDB
@@ -1130,9 +1143,13 @@ export default function ProjectPlanningBoard() {
     };
     
     // Load Supabase script first
-    const script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
-    script.onload = () => loadData();
+    if (!document.querySelector('script[src*="supabase"]')) {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
+      document.head.appendChild(script);
+    }
+    
+    loadData();
     document.head.appendChild(script);
   }, [currentUser]);
 

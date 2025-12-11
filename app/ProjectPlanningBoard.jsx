@@ -4,7 +4,7 @@ import { Type, Image, Minus, Move, Pencil, Trash2, Eraser, Maximize2, LogOut } f
 export default function ProjectPlanningBoard() {
   // Supabase configuration
   const SUPABASE_URL = 'https://wdxeucdxzwerqkdicwgq.supabase.co';
-  const SUPABASE_ANON_KEY = 'sb_publishable_FK3P8dHVNIQLNQrbFJ6rCw_u-Jtpa_K';
+  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndkeGV1Y2R4endlcnFrZGljd2dxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU0Njc0ODUsImV4cCI6MjA4MTA0MzQ4NX0.0KpU4ehry7mSo5DkMz6iL-N34XxlNmz8-X-m16Gz308';
   
   // Auth state
   const [isAuthenticated, setIsAuthenticated] = useState(false);

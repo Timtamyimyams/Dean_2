@@ -181,6 +181,7 @@ export default function ProjectPlanningBoard() {
   const [lastCanvasClick, setLastCanvasClick] = useState(0);
   const [clickTimeout, setClickTimeout] = useState(null);
   const [justFinishedSelecting, setJustFinishedSelecting] = useState(false);
+  const [justFinishedTextEdit, setJustFinishedTextEdit] = useState(false);
   const [showHelp, setShowHelp] = useState(true); // Show on first load
   const [collaborationMode, setCollaborationMode] = useState(false);
   const [collaborationBoardId, setCollaborationBoardId] = useState(null);
@@ -230,6 +231,9 @@ export default function ProjectPlanningBoard() {
       autoSwitchToSelect: true,
       
       onCanvasClick: ({ x, y }, context) => {
+        // Skip if we just finished editing text (grace click)
+        if (context.justFinishedTextEdit) return;
+        
         const newElement = {
           id: Date.now(),
           type: 'text',
@@ -1459,6 +1463,7 @@ export default function ProjectPlanningBoard() {
         setTextInput,
         setSelectedTool,
         saveToHistory,
+        justFinishedTextEdit,
       };
       tool.onCanvasClick({ x, y }, context);
       return;
@@ -2075,6 +2080,9 @@ export default function ProjectPlanningBoard() {
       setEditingText(null);
       setTextInput('');
       setSelectedTool('select');
+      // Set grace flag to prevent immediate new text box creation
+      setJustFinishedTextEdit(true);
+      setTimeout(() => setJustFinishedTextEdit(false), 100);
     }
   };
 
@@ -2088,6 +2096,10 @@ export default function ProjectPlanningBoard() {
       setElements(elements.filter(el => el.id !== editingText));
       setEditingText(null);
       setTextInput('');
+      setSelectedTool('select');
+      // Set grace flag to prevent immediate new text box creation
+      setJustFinishedTextEdit(true);
+      setTimeout(() => setJustFinishedTextEdit(false), 100);
     }
   };
 
@@ -2687,6 +2699,19 @@ export default function ProjectPlanningBoard() {
                             e.preventDefault();
                             document.execCommand('italic', false, null);
                           }
+                          // Handle Enter to finish editing
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            const content = e.target.innerHTML;
+                            setElements(elements.map(element =>
+                              element.id === el.id ? { ...element, content } : element
+                            ));
+                            setEditingText(null);
+                            setSelectedTool('select');
+                            setJustFinishedTextEdit(true);
+                            setTimeout(() => setJustFinishedTextEdit(false), 100);
+                            setTimeout(() => saveToHistory(), 50);
+                          }
                           // Handle Escape to finish editing
                           if (e.key === 'Escape') {
                             const content = e.target.innerHTML;
@@ -2694,6 +2719,9 @@ export default function ProjectPlanningBoard() {
                               element.id === el.id ? { ...element, content } : element
                             ));
                             setEditingText(null);
+                            setSelectedTool('select');
+                            setJustFinishedTextEdit(true);
+                            setTimeout(() => setJustFinishedTextEdit(false), 100);
                             setTimeout(() => saveToHistory(), 50);
                           }
                         }}
@@ -2703,6 +2731,9 @@ export default function ProjectPlanningBoard() {
                             element.id === el.id ? { ...element, content } : element
                           ));
                           setEditingText(null);
+                          setSelectedTool('select');
+                          setJustFinishedTextEdit(true);
+                          setTimeout(() => setJustFinishedTextEdit(false), 100);
                           setTimeout(() => saveToHistory(), 50);
                         }}
                         onClick={(e) => e.stopPropagation()}

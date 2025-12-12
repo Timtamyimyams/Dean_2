@@ -187,6 +187,9 @@ export default function ProjectPlanningBoard() {
   const [collaborationBoardId, setCollaborationBoardId] = useState(null);
   const [lastRemoteUpdate, setLastRemoteUpdate] = useState(0);
   const [remoteUsers, setRemoteUsers] = useState([]);
+  const isRemoteUpdate = useRef(false);
+  const realtimeChannel = useRef(null);
+  const lastSavedRef = useRef(null);
 
   // Tool Definitions - Centralized tool logic
   const toolDefinitions = {
@@ -927,12 +930,13 @@ export default function ProjectPlanningBoard() {
     if (!currentUser) return;
     
     try {
+      const savedAt = new Date();
       const boardData = {
         name: currentBoardName,
         elements,
         groups,
         zoom,
-        savedAt: new Date().toISOString()
+        savedAt: savedAt.toISOString()
       };
       
       const boardId = `${currentUser.username}-${currentBoardName}`;
@@ -943,13 +947,14 @@ export default function ProjectPlanningBoard() {
           id: boardId,
           user_id: currentUser.username,
           data: boardData,
-          updated_at: new Date().toISOString()
+          updated_at: savedAt.toISOString()
         });
       
       if (error) {
         console.error('Supabase save error:', error);
       } else {
-        setLastSaved(new Date());
+        setLastSaved(savedAt);
+        lastSavedRef.current = savedAt;
         console.log('Saved to Supabase');
       }
     } catch (err) {
@@ -1033,6 +1038,9 @@ export default function ProjectPlanningBoard() {
 
   // Auto-save effect
   useEffect(() => {
+    // Skip auto-save if this change came from a remote update
+    if (isRemoteUpdate.current) return;
+    
     const autoSave = setTimeout(() => {
       if ((elements.length > 0 || groups.length > 0) && currentUser) {
         // Save to Supabase
@@ -1045,9 +1053,11 @@ export default function ProjectPlanningBoard() {
     return () => clearTimeout(autoSave);
   }, [elements, groups, currentUser]);
 
-  // Load from Supabase on login
+  // Load from Supabase on login and subscribe to realtime updates
   useEffect(() => {
     if (!currentUser) return;
+    
+    const boardId = `${currentUser.username}-${currentBoardName}`;
     
     const loadData = async () => {
       // Check if user wants to start fresh
@@ -1061,7 +1071,6 @@ export default function ProjectPlanningBoard() {
       
       // Try Supabase
       try {
-        const boardId = `${currentUser.username}-${currentBoardName}`;
         console.log('Loading board:', boardId);
         
         const { data, error } = await supabase
@@ -1076,11 +1085,15 @@ export default function ProjectPlanningBoard() {
         
         if (data && data.data) {
           const boardData = data.data;
+          isRemoteUpdate.current = true;
           setElements(boardData.elements || []);
           setGroups(boardData.groups || []);
           setZoom(boardData.zoom || 1);
-          setLastSaved(new Date(boardData.savedAt));
+          const savedTime = new Date(boardData.savedAt);
+          setLastSaved(savedTime);
+          lastSavedRef.current = savedTime;
           console.log('Loaded from Supabase:', boardData.elements?.length, 'elements');
+          setTimeout(() => { isRemoteUpdate.current = false; }, 100);
           return;
         }
       } catch (err) {
@@ -1097,7 +1110,9 @@ export default function ProjectPlanningBoard() {
           setElements(boardData.elements || []);
           setGroups(boardData.groups || []);
           setZoom(boardData.zoom || 1);
-          setLastSaved(new Date(boardData.savedAt));
+          const savedTime = new Date(boardData.savedAt);
+          setLastSaved(savedTime);
+          lastSavedRef.current = savedTime;
           console.log('Loaded from IndexedDB');
         }
       } catch (err) {
@@ -1106,7 +1121,48 @@ export default function ProjectPlanningBoard() {
     };
     
     loadData();
-  }, [currentUser]);
+    
+    // Subscribe to realtime updates for this board
+    console.log('Subscribing to realtime updates for:', boardId);
+    realtimeChannel.current = supabase
+      .channel(`board:${boardId}`)
+      .on('postgres_changes', 
+        { event: '*', schema: 'public', table: 'boards', filter: `id=eq.${boardId}` },
+        (payload) => {
+          console.log('Realtime update received:', payload);
+          if (payload.new && payload.new.data) {
+            const boardData = payload.new.data;
+            // Only apply if this wasn't our own save (check timestamp)
+            const remoteTimestamp = new Date(boardData.savedAt).getTime();
+            const localTimestamp = lastSavedRef.current ? lastSavedRef.current.getTime() : 0;
+            
+            // If remote is newer by at least 500ms, apply it
+            if (remoteTimestamp > localTimestamp + 500) {
+              console.log('Applying remote update');
+              isRemoteUpdate.current = true;
+              setElements(boardData.elements || []);
+              setGroups(boardData.groups || []);
+              setZoom(boardData.zoom || 1);
+              setLastSaved(new Date(boardData.savedAt));
+              lastSavedRef.current = new Date(boardData.savedAt);
+              setTimeout(() => { isRemoteUpdate.current = false; }, 100);
+            }
+          }
+        }
+      )
+      .subscribe((status) => {
+        console.log('Realtime subscription status:', status);
+      });
+    
+    // Cleanup subscription on unmount or user change
+    return () => {
+      if (realtimeChannel.current) {
+        console.log('Unsubscribing from realtime');
+        supabase.removeChannel(realtimeChannel.current);
+        realtimeChannel.current = null;
+      }
+    };
+  }, [currentUser, currentBoardName]);
 
   // Track changes for history
   useEffect(() => {

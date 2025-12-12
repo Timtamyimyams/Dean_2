@@ -187,9 +187,13 @@ export default function ProjectPlanningBoard() {
   const [collaborationBoardId, setCollaborationBoardId] = useState(null);
   const [lastRemoteUpdate, setLastRemoteUpdate] = useState(0);
   const [remoteUsers, setRemoteUsers] = useState([]);
+  const [deletedIds, setDeletedIds] = useState(new Set()); // Tombstones for deleted elements
   const isRemoteUpdate = useRef(false);
   const realtimeChannel = useRef(null);
   const lastSavedRef = useRef(null);
+  const elementsRef = useRef([]);
+  const groupsRef = useRef([]);
+  const deletedIdsRef = useRef(new Set());
 
   // Tool Definitions - Centralized tool logic
   const toolDefinitions = {
@@ -936,6 +940,7 @@ export default function ProjectPlanningBoard() {
         elements,
         groups,
         zoom,
+        deletedIds: Array.from(deletedIds), // Include tombstones
         savedAt: savedAt.toISOString()
       };
       
@@ -1024,6 +1029,7 @@ export default function ProjectPlanningBoard() {
         elements,
         groups,
         zoom,
+        deletedIds: Array.from(deletedIds),
         savedAt: new Date().toISOString()
       };
 
@@ -1036,6 +1042,19 @@ export default function ProjectPlanningBoard() {
     }
   };
 
+  // Keep refs in sync with state for realtime callbacks
+  useEffect(() => {
+    elementsRef.current = elements;
+  }, [elements]);
+  
+  useEffect(() => {
+    groupsRef.current = groups;
+  }, [groups]);
+
+  useEffect(() => {
+    deletedIdsRef.current = deletedIds;
+  }, [deletedIds]);
+
   // Auto-save effect
   useEffect(() => {
     // Skip auto-save if this change came from a remote update
@@ -1045,10 +1064,8 @@ export default function ProjectPlanningBoard() {
       if ((elements.length > 0 || groups.length > 0) && currentUser) {
         // Save to Supabase
         saveToCloud();
-        // Also save to IndexedDB as backup
-        saveToIndexedDB();
       }
-    }, 3000);
+    }, 750);
 
     return () => clearTimeout(autoSave);
   }, [elements, groups, currentUser]);
@@ -1085,14 +1102,16 @@ export default function ProjectPlanningBoard() {
         
         if (data && data.data) {
           const boardData = data.data;
+          const loadedDeletedIds = new Set(boardData.deletedIds || []);
           isRemoteUpdate.current = true;
-          setElements(boardData.elements || []);
-          setGroups(boardData.groups || []);
+          setElements((boardData.elements || []).filter(el => !loadedDeletedIds.has(el.id)));
+          setGroups((boardData.groups || []).filter(g => !loadedDeletedIds.has(g.id)));
+          setDeletedIds(loadedDeletedIds);
           setZoom(boardData.zoom || 1);
           const savedTime = new Date(boardData.savedAt);
           setLastSaved(savedTime);
           lastSavedRef.current = savedTime;
-          console.log('Loaded from Supabase:', boardData.elements?.length, 'elements');
+          console.log('Loaded from Supabase:', boardData.elements?.length, 'elements,', loadedDeletedIds.size, 'deleted');
           setTimeout(() => { isRemoteUpdate.current = false; }, 100);
           return;
         }
@@ -1107,8 +1126,10 @@ export default function ProjectPlanningBoard() {
         const boardData = await tx.objectStore('boards').get(currentBoardName);
         
         if (boardData) {
-          setElements(boardData.elements || []);
-          setGroups(boardData.groups || []);
+          const loadedDeletedIds = new Set(boardData.deletedIds || []);
+          setElements((boardData.elements || []).filter(el => !loadedDeletedIds.has(el.id)));
+          setGroups((boardData.groups || []).filter(g => !loadedDeletedIds.has(g.id)));
+          setDeletedIds(loadedDeletedIds);
           setZoom(boardData.zoom || 1);
           const savedTime = new Date(boardData.savedAt);
           setLastSaved(savedTime);
@@ -1132,21 +1153,50 @@ export default function ProjectPlanningBoard() {
           console.log('Realtime update received:', payload);
           if (payload.new && payload.new.data) {
             const boardData = payload.new.data;
-            // Only apply if this wasn't our own save (check timestamp)
-            const remoteTimestamp = new Date(boardData.savedAt).getTime();
-            const localTimestamp = lastSavedRef.current ? lastSavedRef.current.getTime() : 0;
+            const remoteElements = boardData.elements || [];
+            const remoteGroups = boardData.groups || [];
+            const remoteDeletedIds = new Set(boardData.deletedIds || []);
             
-            // If remote is newer by at least 500ms, apply it
-            if (remoteTimestamp > localTimestamp + 500) {
-              console.log('Applying remote update');
-              isRemoteUpdate.current = true;
-              setElements(boardData.elements || []);
-              setGroups(boardData.groups || []);
-              setZoom(boardData.zoom || 1);
-              setLastSaved(new Date(boardData.savedAt));
-              lastSavedRef.current = new Date(boardData.savedAt);
-              setTimeout(() => { isRemoteUpdate.current = false; }, 100);
-            }
+            // Merge local and remote deleted IDs
+            const localDeletedIds = deletedIdsRef.current;
+            const mergedDeletedIds = new Set([...localDeletedIds, ...remoteDeletedIds]);
+            
+            // Merge strategy: combine local and remote elements by ID
+            // But filter out anything in the tombstone set
+            const localElements = elementsRef.current;
+            const localGroups = groupsRef.current;
+            
+            // Create maps for quick lookup
+            const remoteElementMap = new Map(remoteElements.map(el => [el.id, el]));
+            
+            // Merged elements: start with all remote elements, then add local-only elements
+            // Filter out deleted items
+            const mergedElements = remoteElements.filter(el => !mergedDeletedIds.has(el.id));
+            localElements.forEach(localEl => {
+              if (!remoteElementMap.has(localEl.id) && !mergedDeletedIds.has(localEl.id)) {
+                // This is a new local element not yet in remote and not deleted - keep it
+                mergedElements.push(localEl);
+              }
+            });
+            
+            // Same for groups
+            const remoteGroupMap = new Map(remoteGroups.map(g => [g.id, g]));
+            const mergedGroups = remoteGroups.filter(g => !mergedDeletedIds.has(g.id));
+            localGroups.forEach(localG => {
+              if (!remoteGroupMap.has(localG.id) && !mergedDeletedIds.has(localG.id)) {
+                mergedGroups.push(localG);
+              }
+            });
+            
+            console.log('Merging:', localElements.length, 'local +', remoteElements.length, 'remote =', mergedElements.length, 'merged, deleted:', mergedDeletedIds.size);
+            
+            isRemoteUpdate.current = true;
+            setElements(mergedElements);
+            setGroups(mergedGroups);
+            setDeletedIds(mergedDeletedIds);
+            setLastSaved(new Date(boardData.savedAt));
+            lastSavedRef.current = new Date(boardData.savedAt);
+            setTimeout(() => { isRemoteUpdate.current = false; }, 100);
           }
         }
       )
@@ -2161,6 +2211,12 @@ export default function ProjectPlanningBoard() {
 
   const deleteElements = () => {
     if (selectedElements.length > 0) {
+      // Add deleted IDs to tombstone set
+      setDeletedIds(prev => {
+        const newSet = new Set(prev);
+        selectedElements.forEach(id => newSet.add(id));
+        return newSet;
+      });
       setElements(elements.filter(el => !selectedElements.includes(el.id)));
       setGroups(groups.filter(g => !selectedElements.includes(g.id)));
       setSelectedElements([]);

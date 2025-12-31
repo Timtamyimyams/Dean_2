@@ -1,7 +1,7 @@
 import { selectTool } from './select';
 import { scaleTool } from './scale';
 import { textTool } from './text';
-import { imageTool } from './image';
+import { imageTool } from './Image';
 import { drawTool } from './draw';
 import { lineTool } from './line';
 import { eraseTool } from './erase';

@@ -196,6 +196,31 @@ export default function ProjectPlanningBoard() {
   const groupsRef = useRef([]);
   const deletedIdsRef = useRef(new Set());
 
+  // Collaboration: Cursor presence state
+  const [remoteCursors, setRemoteCursors] = useState({});
+  const presenceChannel = useRef(null);
+  const localCursorPosition = useRef({ x: 0, y: 0 });
+
+  // Chat panel state
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMessages, setMessages] = useState([]);
+  const [chatInput, setChatInput] = useState('');
+  const chatChannel = useRef(null);
+  const commentsChannel = useRef(null);
+  const chatContainerRef = useRef(null);
+
+  // Comments state
+  const [comments, setComments] = useState({});
+  const [activeCommentElement, setActiveCommentElement] = useState(null);
+  const [commentInput, setCommentInput] = useState('');
+  const [contextMenu, setContextMenu] = useState(null);
+
+  // User colors for collaboration
+  const userColors = {
+    'kitten': '#FF6B6B',
+    'slime': '#4ECDC4'
+  };
+
   // Get bounding box of all content
   const getContentBounds = () => {
     if (elements.length === 0 && groups.length === 0) {
@@ -664,84 +689,346 @@ export default function ProjectPlanningBoard() {
 
   // Collaboration: Enable shared board with Supabase
   const enableCollaboration = async () => {
-    const supabase = getSupabaseClient();
-    if (!supabase) {
-      alert('Supabase not available. Make sure the script is loaded.');
+    if (!currentUser) {
+      alert('Please login first to collaborate.');
       return;
     }
-    
-    const boardId = window.prompt('Enter board ID to collaborate on:', 'board-' + Date.now());
+
+    // If already in collaboration mode, disable it
+    if (collaborationMode) {
+      disableCollaboration();
+      return;
+    }
+
+    const boardId = window.prompt('Enter board ID to collaborate on:', 'shared-board');
     if (!boardId) return;
-    
+
     setCollaborationMode(true);
     setCollaborationBoardId(boardId);
-    
-    // Subscribe to real-time changes
-    const channel = supabase
+    setChatOpen(true);
+
+    // Subscribe to real-time board changes
+    const boardChannel = supabase
       .channel(`board:${boardId}`)
-      .on('postgres_changes', 
+      .on('postgres_changes',
         { event: '*', schema: 'public', table: 'boards', filter: `id=eq.${boardId}` },
         (payload) => {
-          if (payload.new && payload.new.data) {
-            const boardData = payload.new.data;
-            setElements(boardData.elements || []);
-            setGroups(boardData.groups || []);
-            setZoom(boardData.zoom || 1);
+          if (payload.new) {
+            // Use isRemoteUpdate flag to prevent infinite sync loops
+            isRemoteUpdate.current = true;
+            setElements(payload.new.elements || []);
+            setGroups(payload.new.groups || []);
+            setTimeout(() => { isRemoteUpdate.current = false; }, 100);
+          }
+        }
+      )
+      .subscribe((status) => {
+        console.log('Board channel status:', status);
+      });
+
+    realtimeChannel.current = boardChannel;
+
+    // Subscribe to presence for cursor tracking
+    const presChannel = supabase.channel(`presence:${boardId}`, {
+      config: {
+        presence: { key: currentUser.username }
+      }
+    });
+
+    presChannel
+      .on('presence', { event: 'sync' }, () => {
+        const state = presChannel.presenceState();
+        const cursors = {};
+        Object.keys(state).forEach(key => {
+          if (key !== currentUser.username && state[key][0]) {
+            cursors[key] = state[key][0];
+          }
+        });
+        setRemoteCursors(cursors);
+      })
+      .on('presence', { event: 'join' }, ({ key, newPresences }) => {
+        if (key !== currentUser.username) {
+          setRemoteUsers(prev => [...new Set([...prev, key])]);
+        }
+      })
+      .on('presence', { event: 'leave' }, ({ key }) => {
+        setRemoteUsers(prev => prev.filter(u => u !== key));
+        setRemoteCursors(prev => {
+          const newCursors = { ...prev };
+          delete newCursors[key];
+          return newCursors;
+        });
+      })
+      .subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') {
+          await presChannel.track({
+            username: currentUser.username,
+            x: 0,
+            y: 0,
+            color: userColors[currentUser.username] || '#FFFFFF'
+          });
+        }
+      });
+
+    presenceChannel.current = presChannel;
+
+    // Subscribe to chat messages
+    const msgChannel = supabase
+      .channel(`chat:${boardId}`)
+      .on('postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'messages', filter: `board_id=eq.${boardId}` },
+        (payload) => {
+          if (payload.new) {
+            setMessages(prev => [...prev, payload.new]);
           }
         }
       )
       .subscribe();
-    
-    // Load initial data
+
+    chatChannel.current = msgChannel;
+
+    // Load initial board data
     const { data } = await supabase
       .from('boards')
       .select('*')
       .eq('id', boardId)
       .single();
-    
-    if (data && data.data) {
-      setElements(data.data.elements || []);
-      setGroups(data.data.groups || []);
-      setZoom(data.data.zoom || 1);
+
+    if (data) {
+      isRemoteUpdate.current = true;
+      setElements(data.elements || []);
+      setGroups(data.groups || []);
+      setZoom(data.viewport?.zoom || 1);
+      setTimeout(() => { isRemoteUpdate.current = false; }, 100);
     }
-    
-    alert(`Collaboration enabled! Share this ID: ${boardId}\n\nAnyone with this link can join in real-time.`);
+
+    // Load existing chat messages
+    const { data: msgData } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('board_id', boardId)
+      .order('created_at', { ascending: true })
+      .limit(100);
+
+    if (msgData) {
+      setMessages(msgData);
+    }
+
+    // Subscribe to comments updates
+    const cmtChannel = supabase
+      .channel(`comments:${boardId}`)
+      .on('postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'comments', filter: `board_id=eq.${boardId}` },
+        (payload) => {
+          if (payload.new) {
+            const newComment = payload.new;
+            setComments(prev => ({
+              ...prev,
+              [newComment.element_id]: [...(prev[newComment.element_id] || []), newComment]
+            }));
+          }
+        }
+      )
+      .subscribe();
+
+    commentsChannel.current = cmtChannel;
+
+    // Load existing comments
+    const { data: commentsData } = await supabase
+      .from('comments')
+      .select('*')
+      .eq('board_id', boardId)
+      .order('created_at', { ascending: true });
+
+    if (commentsData) {
+      const commentsMap = {};
+      commentsData.forEach(c => {
+        if (!commentsMap[c.element_id]) {
+          commentsMap[c.element_id] = [];
+        }
+        commentsMap[c.element_id].push(c);
+      });
+      setComments(commentsMap);
+    }
+
+    alert(`Collaboration enabled! Share this ID: ${boardId}\n\nOther users can join by entering the same ID.`);
   };
+
+  // Disable collaboration mode
+  const disableCollaboration = () => {
+    if (realtimeChannel.current) {
+      supabase.removeChannel(realtimeChannel.current);
+      realtimeChannel.current = null;
+    }
+    if (presenceChannel.current) {
+      supabase.removeChannel(presenceChannel.current);
+      presenceChannel.current = null;
+    }
+    if (chatChannel.current) {
+      supabase.removeChannel(chatChannel.current);
+      chatChannel.current = null;
+    }
+    if (commentsChannel.current) {
+      supabase.removeChannel(commentsChannel.current);
+      commentsChannel.current = null;
+    }
+    setCollaborationMode(false);
+    setCollaborationBoardId(null);
+    setRemoteCursors({});
+    setRemoteUsers([]);
+    setChatOpen(false);
+    setMessages([]);
+    setComments({});
+  };
+
+  // Update cursor position in presence channel (throttled)
+  const updateCursorPosition = useRef(
+    (() => {
+      let lastUpdate = 0;
+      return (x, y) => {
+        const now = Date.now();
+        if (now - lastUpdate < 50) return; // Throttle to 20fps
+        lastUpdate = now;
+
+        if (presenceChannel.current && collaborationMode && currentUser) {
+          localCursorPosition.current = { x, y };
+          presenceChannel.current.track({
+            username: currentUser.username,
+            x,
+            y,
+            color: userColors[currentUser.username] || '#FFFFFF'
+          });
+        }
+      };
+    })()
+  ).current;
+
+  // Send chat message
+  const sendChatMessage = async () => {
+    if (!chatInput.trim() || !collaborationMode || !collaborationBoardId || !currentUser) return;
+
+    try {
+      const { error } = await supabase
+        .from('messages')
+        .insert({
+          board_id: collaborationBoardId,
+          user_id: currentUser.username,
+          username: currentUser.name || currentUser.username,
+          content: chatInput.trim(),
+          created_at: new Date().toISOString()
+        });
+
+      if (error) {
+        console.error('Error sending message:', error);
+      } else {
+        setChatInput('');
+      }
+    } catch (err) {
+      console.error('Error sending chat message:', err);
+    }
+  };
+
+  // Add comment to element
+  const addComment = async (elementId, content) => {
+    if (!content.trim() || !collaborationMode || !collaborationBoardId || !currentUser) return;
+
+    try {
+      const newComment = {
+        board_id: collaborationBoardId,
+        element_id: elementId,
+        user_id: currentUser.username,
+        username: currentUser.name || currentUser.username,
+        content: content.trim(),
+        created_at: new Date().toISOString()
+      };
+
+      const { data, error } = await supabase
+        .from('comments')
+        .insert(newComment)
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Error adding comment:', error);
+      } else {
+        setComments(prev => ({
+          ...prev,
+          [elementId]: [...(prev[elementId] || []), data]
+        }));
+        setCommentInput('');
+      }
+    } catch (err) {
+      console.error('Error adding comment:', err);
+    }
+  };
+
+  // Handle right-click context menu on elements
+  const handleElementContextMenu = (e, elementId) => {
+    if (!collaborationMode) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const worldCoords = getWorldCoords(e);
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      elementId,
+      worldX: worldCoords.x,
+      worldY: worldCoords.y
+    });
+  };
+
+  // Close context menu when clicking elsewhere
+  useEffect(() => {
+    const handleClick = () => setContextMenu(null);
+    window.addEventListener('click', handleClick);
+    return () => window.removeEventListener('click', handleClick);
+  }, []);
+
+  // Auto-scroll chat to bottom when new messages arrive
+  useEffect(() => {
+    if (chatContainerRef.current) {
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+    }
+  }, [chatMessages]);
 
   // Supabase: Save to shared board
   const saveToSharedBoard = async () => {
     if (!collaborationMode || !collaborationBoardId) return;
-    
-    const supabase = getSupabaseClient();
-    if (!supabase) return;
-    
+    // Don't save if this was a remote update to prevent infinite loops
+    if (isRemoteUpdate.current) return;
+
     try {
-      const boardData = {
-        elements,
-        groups,
-        zoom
-      };
-      
-      await supabase
+      const { error } = await supabase
         .from('boards')
         .upsert({
           id: collaborationBoardId,
-          data: boardData,
+          elements: elementsRef.current,
+          groups: groupsRef.current,
+          viewport: { x: 0, y: 0, zoom },
+          updated_by: currentUser?.username,
           updated_at: new Date().toISOString()
         });
+
+      if (error) {
+        console.error('Error saving to shared board:', error);
+      } else {
+        console.log('Saved to shared board:', collaborationBoardId);
+      }
     } catch (err) {
       console.error('Error saving to Supabase:', err);
     }
   };
 
-  // Collaboration: Auto-save changes to Supabase
+  // Collaboration: Auto-save changes to Supabase (debounced)
   useEffect(() => {
     if (!collaborationMode) return;
-    
+    // Don't trigger save for remote updates
+    if (isRemoteUpdate.current) return;
+
     const saveTimeout = setTimeout(() => {
       saveToSharedBoard();
     }, 1000); // Debounce saves
-    
+
     return () => clearTimeout(saveTimeout);
   }, [elements, groups, collaborationMode]);
 
@@ -751,23 +1038,18 @@ export default function ProjectPlanningBoard() {
     
     try {
       const savedAt = new Date();
-      const boardData = {
-        name: currentBoardName,
-        elements,
-        groups,
-        zoom,
-        deletedIds: Array.from(deletedIds), // Include tombstones
-        savedAt: savedAt.toISOString()
-      };
-      
       const boardId = `${currentUser.username}-${currentBoardName}`;
-      
+
       const { error } = await supabase
         .from('boards')
         .upsert({
           id: boardId,
-          user_id: currentUser.username,
-          data: boardData,
+          name: currentBoardName,
+          elements,
+          groups,
+          viewport: { x: 0, y: 0, zoom, deletedIds: Array.from(deletedIds) },
+          created_by: currentUser.username,
+          updated_by: currentUser.username,
           updated_at: savedAt.toISOString()
         });
       
@@ -792,19 +1074,18 @@ export default function ProjectPlanningBoard() {
       
       const { data, error } = await supabase
         .from('boards')
-        .select('data')
+        .select('*')
         .eq('id', boardId)
         .single();
-      
+
       if (error) throw error;
-      
-      if (data && data.data) {
-        const boardData = data.data;
-        setElements(boardData.elements || []);
-        setGroups(boardData.groups || []);
-        setZoom(boardData.zoom || 1);
+
+      if (data) {
+        setElements(data.elements || []);
+        setGroups(data.groups || []);
+        setZoom(data.viewport?.zoom || 1);
         setCurrentBoardName(boardName);
-        setLastSaved(new Date(boardData.savedAt));
+        setLastSaved(new Date(data.updated_at));
         alert(`Loaded: ${boardName}`);
       }
     } catch (err) {
@@ -816,17 +1097,17 @@ export default function ProjectPlanningBoard() {
   // List all boards for current user
   const listCloudBoards = async () => {
     if (!currentUser) return;
-    
+
     try {
       const { data, error } = await supabase
         .from('boards')
-        .select('id, data')
-        .eq('user_id', currentUser.username);
-      
+        .select('id, name')
+        .eq('created_by', currentUser.username);
+
       if (error) throw error;
-      
+
       if (data && data.length > 0) {
-        const boardNames = data.map(b => b.data.name || b.id);
+        const boardNames = data.map(b => b.name || b.id);
         alert(`Your boards:\n\n${boardNames.join('\n')}`);
       } else {
         alert('No boards found.');
@@ -905,29 +1186,28 @@ export default function ProjectPlanningBoard() {
       // Try Supabase
       try {
         console.log('Loading board:', boardId);
-        
+
         const { data, error } = await supabase
           .from('boards')
-          .select('data')
+          .select('*')
           .eq('id', boardId)
           .single();
-        
+
         if (error) {
           console.log('Supabase error:', error);
         }
-        
-        if (data && data.data) {
-          const boardData = data.data;
-          const loadedDeletedIds = new Set(boardData.deletedIds || []);
+
+        if (data) {
+          const loadedDeletedIds = new Set(data.viewport?.deletedIds || []);
           isRemoteUpdate.current = true;
-          setElements((boardData.elements || []).filter(el => !loadedDeletedIds.has(el.id)));
-          setGroups((boardData.groups || []).filter(g => !loadedDeletedIds.has(g.id)));
+          setElements((data.elements || []).filter(el => !loadedDeletedIds.has(el.id)));
+          setGroups((data.groups || []).filter(g => !loadedDeletedIds.has(g.id)));
           setDeletedIds(loadedDeletedIds);
-          setZoom(boardData.zoom || 1);
-          const savedTime = new Date(boardData.savedAt);
+          setZoom(data.viewport?.zoom || 1);
+          const savedTime = new Date(data.updated_at);
           setLastSaved(savedTime);
           lastSavedRef.current = savedTime;
-          console.log('Loaded from Supabase:', boardData.elements?.length, 'elements,', loadedDeletedIds.size, 'deleted');
+          console.log('Loaded from Supabase:', data.elements?.length, 'elements,', loadedDeletedIds.size, 'deleted');
           setTimeout(() => { isRemoteUpdate.current = false; }, 100);
           return;
         }
@@ -967,24 +1247,23 @@ export default function ProjectPlanningBoard() {
         { event: '*', schema: 'public', table: 'boards', filter: `id=eq.${boardId}` },
         (payload) => {
           console.log('Realtime update received:', payload);
-          if (payload.new && payload.new.data) {
-            const boardData = payload.new.data;
-            const remoteElements = boardData.elements || [];
-            const remoteGroups = boardData.groups || [];
-            const remoteDeletedIds = new Set(boardData.deletedIds || []);
-            
+          if (payload.new) {
+            const remoteElements = payload.new.elements || [];
+            const remoteGroups = payload.new.groups || [];
+            const remoteDeletedIds = new Set(payload.new.viewport?.deletedIds || []);
+
             // Merge local and remote deleted IDs
             const localDeletedIds = deletedIdsRef.current;
             const mergedDeletedIds = new Set([...localDeletedIds, ...remoteDeletedIds]);
-            
+
             // Merge strategy: combine local and remote elements by ID
             // But filter out anything in the tombstone set
             const localElements = elementsRef.current;
             const localGroups = groupsRef.current;
-            
+
             // Create maps for quick lookup
             const remoteElementMap = new Map(remoteElements.map(el => [el.id, el]));
-            
+
             // Merged elements: start with all remote elements, then add local-only elements
             // Filter out deleted items
             const mergedElements = remoteElements.filter(el => !mergedDeletedIds.has(el.id));
@@ -994,7 +1273,7 @@ export default function ProjectPlanningBoard() {
                 mergedElements.push(localEl);
               }
             });
-            
+
             // Same for groups
             const remoteGroupMap = new Map(remoteGroups.map(g => [g.id, g]));
             const mergedGroups = remoteGroups.filter(g => !mergedDeletedIds.has(g.id));
@@ -1003,15 +1282,15 @@ export default function ProjectPlanningBoard() {
                 mergedGroups.push(localG);
               }
             });
-            
+
             console.log('Merging:', localElements.length, 'local +', remoteElements.length, 'remote =', mergedElements.length, 'merged, deleted:', mergedDeletedIds.size);
-            
+
             isRemoteUpdate.current = true;
             setElements(mergedElements);
             setGroups(mergedGroups);
             setDeletedIds(mergedDeletedIds);
-            setLastSaved(new Date(boardData.savedAt));
-            lastSavedRef.current = new Date(boardData.savedAt);
+            setLastSaved(new Date(payload.new.updated_at));
+            lastSavedRef.current = new Date(payload.new.updated_at);
             setTimeout(() => { isRemoteUpdate.current = false; }, 100);
           }
         }
@@ -1672,23 +1951,31 @@ export default function ProjectPlanningBoard() {
 
   const handleMouseMove = (e) => {
     if (editingText) return;
-    
+
     setMousePos({ x: e.clientX, y: e.clientY });
-    
+
+    // Get world coordinates for cursor tracking
+    const worldCoords = getWorldCoords(e);
+
+    // Update cursor position for collaboration
+    if (collaborationMode) {
+      updateCursorPosition(worldCoords.x, worldCoords.y);
+    }
+
     if (isPanning) {
       const deltaX = e.clientX - panStart.x;
       const deltaY = e.clientY - panStart.y;
-      
+
       if (canvasRef.current) {
         canvasRef.current.scrollLeft -= deltaX;
         canvasRef.current.scrollTop -= deltaY;
       }
-      
+
       setPanStart({ x: e.clientX, y: e.clientY });
       return;
     }
-    
-    const { x, y } = getWorldCoords(e);
+
+    const { x, y } = worldCoords;
 
     // Handle scaling
     if (isScaling && scaleStart && scaleOrigin) {
@@ -2321,18 +2608,32 @@ export default function ProjectPlanningBoard() {
             </button>
           )}
           
-          {false && ( // Hidden for now
           <button
             onClick={enableCollaboration}
             className={`px-2 py-1 text-xs border ml-3 ${
-              collaborationMode 
-                ? 'bg-white text-black border-white' 
+              collaborationMode
+                ? 'bg-white text-black border-white'
                 : 'bg-black text-white border-white hover:bg-white hover:text-black'
             }`}
-            title="Enable real-time collaboration"
+            title={collaborationMode ? `Board: ${collaborationBoardId} (click to disconnect)` : 'Enable real-time collaboration'}
           >
-            {collaborationMode ? '🟢 Live' : 'Collaborate'}
+            {collaborationMode ? 'LIVE' : 'Collaborate'}
           </button>
+          {collaborationMode && (
+            <div className="flex items-center gap-1 ml-2">
+              {/* Show online users */}
+              {remoteUsers.length > 0 && remoteUsers.map(user => (
+                <div
+                  key={user}
+                  className="w-3 h-3 rounded-full border border-black"
+                  style={{ backgroundColor: userColors[user] || '#FFFFFF' }}
+                  title={user}
+                />
+              ))}
+              <span className="text-white text-xs opacity-75 ml-1">
+                {collaborationBoardId}
+              </span>
+            </div>
           )}
           
           <button
@@ -2607,7 +2908,25 @@ export default function ProjectPlanningBoard() {
               onClick={(e) => e.stopPropagation()}
               onDoubleClick={(e) => handleDoubleClick(e, el.id)}
               onDragStart={(e) => e.preventDefault()}
+              onContextMenu={(e) => handleElementContextMenu(e, el.id)}
             >
+              {/* Comment indicator */}
+              {collaborationMode && comments[el.id] && comments[el.id].length > 0 && (
+                <div
+                  className="absolute -top-2 -right-2 w-5 h-5 rounded-full flex items-center justify-center text-xs cursor-pointer z-10"
+                  style={{
+                    backgroundColor: userColors[comments[el.id][0]?.user_id] || '#FFFFFF',
+                    color: '#000000'
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setActiveCommentElement(el.id);
+                  }}
+                  title={`${comments[el.id].length} comment(s)`}
+                >
+                  {comments[el.id].length}
+                </div>
+              )}
               {el.type === 'text' && (
                 <>
                   {editingText === el.id ? (
@@ -2749,8 +3068,223 @@ export default function ProjectPlanningBoard() {
             </div>
           ))}
         </div>
+
+          {/* Remote Cursors - rendered inside the scaled canvas area */}
+          {collaborationMode && Object.entries(remoteCursors).map(([username, cursor]) => (
+            <div
+              key={username}
+              className="absolute pointer-events-none z-50"
+              style={{
+                left: cursor.x * zoom,
+                top: cursor.y * zoom,
+                transform: 'translate(-2px, -2px)',
+                transition: 'left 0.05s linear, top 0.05s linear'
+              }}
+            >
+              {/* Cursor arrow */}
+              <svg
+                width="24"
+                height="24"
+                viewBox="0 0 24 24"
+                fill={cursor.color || userColors[username] || '#FFFFFF'}
+                style={{ filter: 'drop-shadow(1px 1px 1px rgba(0,0,0,0.5))' }}
+              >
+                <path d="M5.5 3.21V20.8c0 .45.54.67.85.35l4.86-4.86a.5.5 0 0 1 .35-.15h6.87c.48 0 .72-.58.38-.92L6.35 2.85a.5.5 0 0 0-.85.36z" />
+              </svg>
+              {/* Username label */}
+              <div
+                className="absolute left-5 top-4 px-1 py-0.5 text-xs font-mono whitespace-nowrap"
+                style={{
+                  backgroundColor: cursor.color || userColors[username] || '#FFFFFF',
+                  color: '#000000',
+                  borderRadius: '2px',
+                  fontSize: '10px'
+                }}
+              >
+                {username}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
+
+      {/* Chat Panel - Fixed on right side */}
+      {collaborationMode && (
+        <div
+          className={`fixed right-0 top-0 h-full bg-black border-l border-white flex flex-col z-40 transition-transform ${
+            chatOpen ? 'translate-x-0' : 'translate-x-full'
+          }`}
+          style={{ width: '300px' }}
+        >
+          {/* Chat Header */}
+          <div className="p-3 border-b border-white flex items-center justify-between">
+            <span className="text-white text-sm font-mono">CHAT</span>
+            <div className="flex items-center gap-2">
+              {/* Online users indicator */}
+              <div className="flex items-center gap-1">
+                {remoteUsers.map(user => (
+                  <div
+                    key={user}
+                    className="w-2 h-2 rounded-full"
+                    style={{ backgroundColor: userColors[user] || '#FFFFFF' }}
+                    title={user}
+                  />
+                ))}
+              </div>
+              <button
+                onClick={() => setChatOpen(false)}
+                className="text-white hover:text-gray-400 text-xs"
+              >
+                X
+              </button>
+            </div>
+          </div>
+
+          {/* Chat Messages */}
+          <div ref={chatContainerRef} className="flex-1 overflow-y-auto p-3 space-y-2">
+            {chatMessages.map((msg, i) => (
+              <div key={msg.id || i} className="text-xs font-mono">
+                <div className="flex items-center gap-1">
+                  <span
+                    style={{ color: userColors[msg.user_id] || '#FFFFFF' }}
+                  >
+                    {msg.username || msg.user_id}
+                  </span>
+                  <span className="text-gray-500 text-[10px]">
+                    {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </div>
+                <div className="text-white pl-2">{msg.content}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Chat Input */}
+          <div className="p-3 border-t border-white">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendChatMessage();
+                  }
+                }}
+                placeholder="Type a message..."
+                className="flex-1 bg-black border border-white text-white text-xs p-2 font-mono focus:outline-none"
+              />
+              <button
+                onClick={sendChatMessage}
+                className="px-3 py-1 bg-white text-black text-xs font-mono hover:bg-gray-200"
+              >
+                Send
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Chat Toggle Button - when chat is closed */}
+      {collaborationMode && !chatOpen && (
+        <button
+          onClick={() => setChatOpen(true)}
+          className="fixed right-4 bottom-4 px-3 py-2 bg-black border border-white text-white text-xs font-mono hover:bg-white hover:text-black z-40"
+        >
+          Chat {chatMessages.length > 0 && `(${chatMessages.length})`}
+        </button>
+      )}
+
+      {/* Context Menu for adding comments */}
+      {contextMenu && (
+        <div
+          className="fixed bg-black border border-white z-50"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="block w-full px-4 py-2 text-white text-xs font-mono hover:bg-white hover:text-black text-left"
+            onClick={() => {
+              setActiveCommentElement(contextMenu.elementId);
+              setContextMenu(null);
+            }}
+          >
+            Add Comment
+          </button>
+        </div>
+      )}
+
+      {/* Comment Panel for active element */}
+      {activeCommentElement && (
+        <div
+          className="fixed bg-black border border-white z-50 p-3"
+          style={{
+            left: '50%',
+            top: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: '320px',
+            maxHeight: '400px'
+          }}
+        >
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-white text-sm font-mono">COMMENTS</span>
+            <button
+              onClick={() => {
+                setActiveCommentElement(null);
+                setCommentInput('');
+              }}
+              className="text-white hover:text-gray-400 text-xs"
+            >
+              X
+            </button>
+          </div>
+
+          {/* Existing comments */}
+          <div className="max-h-48 overflow-y-auto mb-3 space-y-2">
+            {(comments[activeCommentElement] || []).map((comment, i) => (
+              <div key={comment.id || i} className="text-xs font-mono border-b border-gray-700 pb-2">
+                <div className="flex items-center gap-1">
+                  <span style={{ color: userColors[comment.user_id] || '#FFFFFF' }}>
+                    {comment.username || comment.user_id}
+                  </span>
+                  <span className="text-gray-500 text-[10px]">
+                    {new Date(comment.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </div>
+                <div className="text-white pl-2">{comment.content}</div>
+              </div>
+            ))}
+            {(!comments[activeCommentElement] || comments[activeCommentElement].length === 0) && (
+              <div className="text-gray-500 text-xs">No comments yet</div>
+            )}
+          </div>
+
+          {/* Add comment input */}
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={commentInput}
+              onChange={(e) => setCommentInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  addComment(activeCommentElement, commentInput);
+                }
+              }}
+              placeholder="Add a comment..."
+              className="flex-1 bg-black border border-white text-white text-xs p-2 font-mono focus:outline-none"
+              autoFocus
+            />
+            <button
+              onClick={() => addComment(activeCommentElement, commentInput)}
+              className="px-3 py-1 bg-white text-black text-xs font-mono hover:bg-gray-200"
+            >
+              Add
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Help Modal */}
       {showHelp && (

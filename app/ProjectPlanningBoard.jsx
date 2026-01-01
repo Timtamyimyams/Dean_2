@@ -1170,7 +1170,9 @@ export default function ProjectPlanningBoard() {
   // Load from Supabase on login and subscribe to realtime updates
   useEffect(() => {
     if (!currentUser) return;
-    
+    // Skip personal board subscription if in collaboration mode
+    if (collaborationMode) return;
+
     const boardId = `${currentUser.username}-${currentBoardName}`;
     
     const loadData = async () => {
@@ -1307,7 +1309,7 @@ export default function ProjectPlanningBoard() {
         realtimeChannel.current = null;
       }
     };
-  }, [currentUser, currentBoardName]);
+  }, [currentUser, currentBoardName, collaborationMode]);
 
   // Track changes for history
   useEffect(() => {

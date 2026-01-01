@@ -707,6 +707,10 @@ export default function ProjectPlanningBoard() {
     setCollaborationBoardId(boardId);
     setChatOpen(true);
 
+    // Set globals for cursor tracking (used by throttled function)
+    window.__currentUsername = currentUser.username;
+    window.__userColor = userColors[currentUser.username] || '#FFFFFF';
+
     // Subscribe to real-time board changes
     const boardChannel = supabase
       .channel(`board:${boardId}`)
@@ -728,49 +732,37 @@ export default function ProjectPlanningBoard() {
 
     realtimeChannel.current = boardChannel;
 
-    // Subscribe to presence for cursor tracking
-    const presChannel = supabase.channel(`presence:${boardId}`, {
-      config: {
-        presence: { key: currentUser.username }
-      }
-    });
+    // Subscribe to broadcast for cursor tracking (faster than presence - no persistence)
+    const cursorChannel = supabase.channel(`cursors:${boardId}`);
 
-    presChannel
-      .on('presence', { event: 'sync' }, () => {
-        const state = presChannel.presenceState();
-        const cursors = {};
-        Object.keys(state).forEach(key => {
-          if (key !== currentUser.username && state[key][0]) {
-            cursors[key] = state[key][0];
-          }
-        });
-        setRemoteCursors(cursors);
-      })
-      .on('presence', { event: 'join' }, ({ key, newPresences }) => {
-        if (key !== currentUser.username) {
-          setRemoteUsers(prev => [...new Set([...prev, key])]);
+    cursorChannel
+      .on('broadcast', { event: 'cursor' }, ({ payload }) => {
+        if (payload.username !== currentUser.username) {
+          setRemoteCursors(prev => ({
+            ...prev,
+            [payload.username]: {
+              x: payload.x,
+              y: payload.y,
+              color: payload.color
+            }
+          }));
+          // Track active users
+          setRemoteUsers(prev => [...new Set([...prev, payload.username])]);
         }
       })
-      .on('presence', { event: 'leave' }, ({ key }) => {
-        setRemoteUsers(prev => prev.filter(u => u !== key));
+      .on('broadcast', { event: 'leave' }, ({ payload }) => {
+        setRemoteUsers(prev => prev.filter(u => u !== payload.username));
         setRemoteCursors(prev => {
           const newCursors = { ...prev };
-          delete newCursors[key];
+          delete newCursors[payload.username];
           return newCursors;
         });
       })
-      .subscribe(async (status) => {
-        if (status === 'SUBSCRIBED') {
-          await presChannel.track({
-            username: currentUser.username,
-            x: 0,
-            y: 0,
-            color: userColors[currentUser.username] || '#FFFFFF'
-          });
-        }
+      .subscribe((status) => {
+        console.log('Cursor channel status:', status);
       });
 
-    presenceChannel.current = presChannel;
+    presenceChannel.current = cursorChannel;
 
     // Subscribe to chat messages
     const msgChannel = supabase
@@ -898,9 +890,15 @@ export default function ProjectPlanningBoard() {
 
         if (presenceChannel.current && collaborationModeRef.current) {
           localCursorPosition.current = { x, y };
-          presenceChannel.current.track({
-            x,
-            y
+          presenceChannel.current.send({
+            type: 'broadcast',
+            event: 'cursor',
+            payload: {
+              username: window.__currentUsername || 'anonymous',
+              x,
+              y,
+              color: window.__userColor || '#FFFFFF'
+            }
           });
         }
       };

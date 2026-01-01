@@ -881,6 +881,12 @@ export default function ProjectPlanningBoard() {
     setComments({});
   };
 
+  // Ref to track collaboration mode for cursor updates
+  const collaborationModeRef = useRef(collaborationMode);
+  useEffect(() => {
+    collaborationModeRef.current = collaborationMode;
+  }, [collaborationMode]);
+
   // Update cursor position in presence channel (throttled)
   const updateCursorPosition = useRef(
     (() => {
@@ -890,13 +896,11 @@ export default function ProjectPlanningBoard() {
         if (now - lastUpdate < 50) return; // Throttle to 20fps
         lastUpdate = now;
 
-        if (presenceChannel.current && collaborationMode && currentUser) {
+        if (presenceChannel.current && collaborationModeRef.current) {
           localCursorPosition.current = { x, y };
           presenceChannel.current.track({
-            username: currentUser.username,
             x,
-            y,
-            color: userColors[currentUser.username] || '#FFFFFF'
+            y
           });
         }
       };

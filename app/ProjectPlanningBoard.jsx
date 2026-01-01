@@ -3084,7 +3084,7 @@ export default function ProjectPlanningBoard() {
                 left: cursor.x * zoom,
                 top: cursor.y * zoom,
                 transform: 'translate(-2px, -2px)',
-                transition: 'left 0.05s linear, top 0.05s linear'
+                transition: 'left 0.1s ease-out, top 0.1s ease-out'
               }}
             >
               {/* Cursor arrow */}

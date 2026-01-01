@@ -196,10 +196,13 @@ export default function ProjectPlanningBoard() {
   const groupsRef = useRef([]);
   const deletedIdsRef = useRef(new Set());
 
-  // Collaboration: Cursor presence state
+  // Collaboration: Cursor presence state (game-style interpolation)
   const [remoteCursors, setRemoteCursors] = useState({});
+  const cursorTargets = useRef({}); // Target positions from network
+  const cursorVelocities = useRef({}); // Velocity for prediction
   const presenceChannel = useRef(null);
   const localCursorPosition = useRef({ x: 0, y: 0 });
+  const animationFrameRef = useRef(null);
 
   // Chat panel state
   const [chatOpen, setChatOpen] = useState(false);
@@ -220,6 +223,48 @@ export default function ProjectPlanningBoard() {
     'kitten': '#FF6B6B',
     'slime': '#4ECDC4'
   };
+
+  // Game-style cursor interpolation loop (runs at 60fps independent of network)
+  useEffect(() => {
+    if (!collaborationMode) return;
+
+    const lerp = (start, end, t) => start + (end - start) * t;
+    const LERP_SPEED = 0.3; // How fast to interpolate (0.1 = slow, 0.5 = fast)
+
+    const animate = () => {
+      const targets = cursorTargets.current;
+      let hasUpdates = false;
+
+      setRemoteCursors(prev => {
+        const next = { ...prev };
+        Object.keys(targets).forEach(username => {
+          const target = targets[username];
+          const current = prev[username] || { x: target.x, y: target.y, color: target.color };
+
+          // Interpolate toward target
+          const newX = lerp(current.x, target.x, LERP_SPEED);
+          const newY = lerp(current.y, target.y, LERP_SPEED);
+
+          // Only update if moved significantly
+          if (Math.abs(newX - current.x) > 0.1 || Math.abs(newY - current.y) > 0.1) {
+            hasUpdates = true;
+            next[username] = { x: newX, y: newY, color: target.color };
+          }
+        });
+        return hasUpdates ? next : prev;
+      });
+
+      animationFrameRef.current = requestAnimationFrame(animate);
+    };
+
+    animationFrameRef.current = requestAnimationFrame(animate);
+
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, [collaborationMode]);
 
   // Get bounding box of all content
   const getContentBounds = () => {
@@ -738,14 +783,12 @@ export default function ProjectPlanningBoard() {
     cursorChannel
       .on('broadcast', { event: 'cursor' }, ({ payload }) => {
         if (payload.username !== currentUser.username) {
-          setRemoteCursors(prev => ({
-            ...prev,
-            [payload.username]: {
-              x: payload.x,
-              y: payload.y,
-              color: payload.color
-            }
-          }));
+          // Store target position - interpolation loop will smoothly animate to it
+          cursorTargets.current[payload.username] = {
+            x: payload.x,
+            y: payload.y,
+            color: payload.color
+          };
           // Track active users
           setRemoteUsers(prev => [...new Set([...prev, payload.username])]);
         }
@@ -3082,7 +3125,7 @@ export default function ProjectPlanningBoard() {
                 left: cursor.x * zoom,
                 top: cursor.y * zoom,
                 transform: 'translate(-2px, -2px)',
-                transition: 'left 0.03s linear, top 0.03s linear'
+                // No CSS transition - JavaScript interpolation handles smoothing
               }}
             >
               {/* Cursor arrow */}

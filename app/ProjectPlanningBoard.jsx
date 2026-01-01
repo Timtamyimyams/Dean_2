@@ -893,7 +893,7 @@ export default function ProjectPlanningBoard() {
       let lastUpdate = 0;
       return (x, y) => {
         const now = Date.now();
-        if (now - lastUpdate < 50) return; // Throttle to 20fps
+        if (now - lastUpdate < 16) return; // Throttle to 60fps
         lastUpdate = now;
 
         if (presenceChannel.current && collaborationModeRef.current) {

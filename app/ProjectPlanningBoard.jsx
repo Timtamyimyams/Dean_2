@@ -789,6 +789,13 @@ export default function ProjectPlanningBoard() {
             y: payload.y,
             color: payload.color
           };
+          // Initialize cursor if it's new (so it appears immediately)
+          setRemoteCursors(prev => {
+            if (!prev[payload.username]) {
+              return { ...prev, [payload.username]: { x: payload.x, y: payload.y, color: payload.color } };
+            }
+            return prev;
+          });
           // Track active users
           setRemoteUsers(prev => [...new Set([...prev, payload.username])]);
         }

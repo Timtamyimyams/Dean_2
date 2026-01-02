@@ -229,29 +229,36 @@ export default function ProjectPlanningBoard() {
     if (!collaborationMode) return;
 
     const lerp = (start, end, t) => start + (end - start) * t;
-    const LERP_SPEED = 0.3; // How fast to interpolate (0.1 = slow, 0.5 = fast)
+    const LERP_SPEED = 0.25; // How fast to interpolate (0.1 = slow, 0.5 = fast)
 
     const animate = () => {
       const targets = cursorTargets.current;
-      let hasUpdates = false;
 
       setRemoteCursors(prev => {
+        // Start with all existing cursors
         const next = { ...prev };
+        let changed = false;
+
+        // Update all cursors that have targets
         Object.keys(targets).forEach(username => {
           const target = targets[username];
-          const current = prev[username] || { x: target.x, y: target.y, color: target.color };
+          const current = next[username] || target;
 
           // Interpolate toward target
           const newX = lerp(current.x, target.x, LERP_SPEED);
           const newY = lerp(current.y, target.y, LERP_SPEED);
 
-          // Only update if moved significantly
-          if (Math.abs(newX - current.x) > 0.1 || Math.abs(newY - current.y) > 0.1) {
-            hasUpdates = true;
+          // Check if moved
+          const moved = Math.abs(newX - current.x) > 0.01 || Math.abs(newY - current.y) > 0.01;
+
+          // Always keep the cursor, update position if moved
+          if (moved || !next[username]) {
+            changed = true;
             next[username] = { x: newX, y: newY, color: target.color };
           }
         });
-        return hasUpdates ? next : prev;
+
+        return changed ? next : prev;
       });
 
       animationFrameRef.current = requestAnimationFrame(animate);

@@ -202,6 +202,7 @@ export default function ProjectPlanningBoard() {
   const cursorTargets = useRef({}); // Target positions from network
   const cursorVelocities = useRef({}); // Velocity for prediction
   const presenceChannel = useRef(null);
+  const channelSubscribed = useRef(false); // Track if channel is ready
   const localCursorPosition = useRef({ x: 0, y: 0 });
   const animationFrameRef = useRef(null);
 
@@ -871,6 +872,7 @@ export default function ProjectPlanningBoard() {
       })
       .subscribe((status) => {
         console.log('Cursor channel status:', status);
+        channelSubscribed.current = (status === 'SUBSCRIBED');
       });
 
     presenceChannel.current = cursorChannel;
@@ -959,6 +961,7 @@ export default function ProjectPlanningBoard() {
 
   // Disable collaboration mode
   const disableCollaboration = () => {
+    channelSubscribed.current = false;
     if (realtimeChannel.current) {
       supabase.removeChannel(realtimeChannel.current);
       realtimeChannel.current = null;
@@ -999,7 +1002,7 @@ export default function ProjectPlanningBoard() {
         if (now - lastUpdate < 33) return; // Throttle to 30fps (better for network)
         lastUpdate = now;
 
-        if (presenceChannel.current && collaborationModeRef.current) {
+        if (presenceChannel.current && collaborationModeRef.current && channelSubscribed.current) {
           localCursorPosition.current = { x, y };
           presenceChannel.current.send({
             type: 'broadcast',
@@ -2256,7 +2259,7 @@ export default function ProjectPlanningBoard() {
       setElements(newElements);
 
       // Broadcast element positions for real-time sync
-      if (collaborationMode && presenceChannel.current) {
+      if (collaborationMode && presenceChannel.current && channelSubscribed.current) {
         selectedElements.forEach(elId => {
           const el = newElements.find(e => e.id === elId);
           if (el) {
@@ -2376,7 +2379,7 @@ export default function ProjectPlanningBoard() {
     }
     
     // Broadcast element-move-end for all selected elements
-    if (isDragging && collaborationMode && presenceChannel.current && selectedElements.length > 0) {
+    if (isDragging && collaborationMode && presenceChannel.current && channelSubscribed.current && selectedElements.length > 0) {
       selectedElements.forEach(elId => {
         presenceChannel.current.send({
           type: 'broadcast',

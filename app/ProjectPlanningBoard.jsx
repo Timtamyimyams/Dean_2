@@ -204,6 +204,10 @@ export default function ProjectPlanningBoard() {
   const localCursorPosition = useRef({ x: 0, y: 0 });
   const animationFrameRef = useRef(null);
 
+  // Real-time element movement (interpolated like cursors)
+  const elementTargets = useRef({}); // Target positions for elements being dragged remotely
+  const elementAnimationRef = useRef(null);
+
   // Chat panel state
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMessages, setMessages] = useState([]);
@@ -269,6 +273,49 @@ export default function ProjectPlanningBoard() {
     return () => {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, [collaborationMode]);
+
+  // Element interpolation loop (smooth remote element dragging)
+  useEffect(() => {
+    if (!collaborationMode) return;
+
+    const lerp = (start, end, t) => start + (end - start) * t;
+    const LERP_SPEED = 0.3;
+
+    const animateElements = () => {
+      const targets = elementTargets.current;
+      const targetIds = Object.keys(targets);
+
+      if (targetIds.length > 0) {
+        setElements(prev => {
+          let changed = false;
+          const next = prev.map(el => {
+            const target = targets[el.id];
+            if (target) {
+              const newX = lerp(el.x, target.x, LERP_SPEED);
+              const newY = lerp(el.y, target.y, LERP_SPEED);
+
+              if (Math.abs(newX - el.x) > 0.1 || Math.abs(newY - el.y) > 0.1) {
+                changed = true;
+                return { ...el, x: newX, y: newY };
+              }
+            }
+            return el;
+          });
+          return changed ? next : prev;
+        });
+      }
+
+      elementAnimationRef.current = requestAnimationFrame(animateElements);
+    };
+
+    elementAnimationRef.current = requestAnimationFrame(animateElements);
+
+    return () => {
+      if (elementAnimationRef.current) {
+        cancelAnimationFrame(elementAnimationRef.current);
       }
     };
   }, [collaborationMode]);
@@ -814,6 +861,21 @@ export default function ProjectPlanningBoard() {
           delete newCursors[payload.username];
           return newCursors;
         });
+      })
+      .on('broadcast', { event: 'element-move' }, ({ payload }) => {
+        // Store target position for element - interpolation will smooth it
+        if (payload.username !== currentUser.username) {
+          elementTargets.current[payload.elementId] = {
+            x: payload.x,
+            y: payload.y
+          };
+        }
+      })
+      .on('broadcast', { event: 'element-move-end' }, ({ payload }) => {
+        // Remove from targets when drag ends
+        if (payload.username !== currentUser.username) {
+          delete elementTargets.current[payload.elementId];
+        }
       })
       .subscribe((status) => {
         console.log('Cursor channel status:', status);
@@ -2189,7 +2251,7 @@ export default function ProjectPlanningBoard() {
       
       setSelectedElements([...selectedEls, ...selectedGrps]);
     } else if (isDragging && selectedElements.length > 0) {
-      setElements(elements.map(el => {
+      const newElements = elements.map(el => {
         if (selectedElements.includes(el.id) && dragOffsets[el.id]) {
           return {
             ...el,
@@ -2198,7 +2260,27 @@ export default function ProjectPlanningBoard() {
           };
         }
         return el;
-      }));
+      });
+      setElements(newElements);
+
+      // Broadcast element positions for real-time sync
+      if (collaborationMode && presenceChannel.current) {
+        selectedElements.forEach(elId => {
+          const el = newElements.find(e => e.id === elId);
+          if (el) {
+            presenceChannel.current.send({
+              type: 'broadcast',
+              event: 'element-move',
+              payload: {
+                username: window.__currentUsername,
+                elementId: el.id,
+                x: el.x,
+                y: el.y
+              }
+            });
+          }
+        });
+      }
       
       setGroups(groups.map(g => {
         if (selectedElements.includes(g.id) && dragOffsets[g.id]) {
@@ -2301,6 +2383,20 @@ export default function ProjectPlanningBoard() {
       setTimeout(() => setJustFinishedSelecting(false), 50);
     }
     
+    // Broadcast element-move-end for all selected elements
+    if (isDragging && collaborationMode && presenceChannel.current && selectedElements.length > 0) {
+      selectedElements.forEach(elId => {
+        presenceChannel.current.send({
+          type: 'broadcast',
+          event: 'element-move-end',
+          payload: {
+            username: window.__currentUsername,
+            elementId: elId
+          }
+        });
+      });
+    }
+
     setIsDragging(false);
     setIsDrawing(false);
     setIsSelecting(false);

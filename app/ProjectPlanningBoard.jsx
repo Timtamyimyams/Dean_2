@@ -3,13 +3,14 @@ import { Trash2, LogOut } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 import { toolDefinitions, tools } from './tools';
 
+// Supabase configuration - OUTSIDE component to prevent multiple instances
+const SUPABASE_URL = 'https://wdxeucdxzwerqkdicwgq.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndkeGV1Y2R4endlcnFrZGljd2dxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU0Njc0ODUsImV4cCI6MjA4MTA0MzQ4NX0.0KpU4ehry7mSo5DkMz6iL-N34XxlNmz8-X-m16Gz308';
+
+// Single Supabase client instance (singleton pattern)
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 export default function ProjectPlanningBoard() {
-  // Supabase configuration
-  const SUPABASE_URL = 'https://wdxeucdxzwerqkdicwgq.supabase.co';
-  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndkeGV1Y2R4endlcnFrZGljd2dxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU0Njc0ODUsImV4cCI6MjA4MTA0MzQ4NX0.0KpU4ehry7mSo5DkMz6iL-N34XxlNmz8-X-m16Gz308';
-  
-  // Initialize Supabase client
-  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   
   // Auth state
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -775,15 +776,6 @@ export default function ProjectPlanningBoard() {
         }
       };
     });
-  };
-
-  // Supabase: Initialize client
-  const getSupabaseClient = () => {
-    if (!window.supabase) {
-      console.error('Supabase not loaded. Add <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>');
-      return null;
-    }
-    return window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   };
 
   // Collaboration: Enable shared board with Supabase
